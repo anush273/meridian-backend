@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "pydantic[email]>=2.13.5",
+]
 
 [project.scripts]
 meridian-backend = "meridian_backend:main"
