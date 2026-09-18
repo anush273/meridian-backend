@@ -3,6 +3,10 @@ from dataclasses import dataclass,field
 from .product import Product
 from .customer import Customer
 
+from meridian_backend.core.exceptions import InvalidOrderStateError
+
+from uuid import UUID
+
 
 @dataclass
 class OrderItem :
@@ -15,7 +19,7 @@ class OrderItem :
 
 @dataclass
 class Order: 
-    id: int
+    id: UUID
     customer: Customer
     status: str
     items: list[OrderItem] =  field(default_factory=list[OrderItem])
@@ -29,6 +33,13 @@ class Order:
 
     def total(self, tax_rate: float = 0.18) -> float:
         return self.subtotal() + self.tax(tax_rate)
+    
+    def mark_paid(self) -> None:
+       if self.status != "PENDING":
+           raise InvalidOrderStateError(order_id = self.id,current_status=self.status,attempted_operation="mark_paid")
+       self.status = "PAID"
+       
+        
   
 
 
