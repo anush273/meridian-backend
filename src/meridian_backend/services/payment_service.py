@@ -1,13 +1,15 @@
+import asyncio
+import logging
 from decimal import Decimal
 from uuid import UUID
 
 from meridian_backend.core.exceptions import PaymentTimeoutError
 
-import logging
+
 
 logger = logging.getLogger(__name__)
 
-def charge_payment_provider(
+async def charge_payment_provider(
     order_id: UUID,
     amount: Decimal,
     simulate_timeout: bool = False,
@@ -16,12 +18,12 @@ def charge_payment_provider(
         raise TimeoutError(
             "Payment provider timed out"
         )
-
+    await asyncio.sleep(1.5)
     return "payment_approved"
 
 
 class PaymentService:
-    def charge(
+  async  def charge(
         self,
         order_id: UUID,
         amount: Decimal,
@@ -32,12 +34,13 @@ class PaymentService:
             "amount": str(amount)
         })
         try:
-            result = charge_payment_provider(order_id, amount, simulate_timeout)
-            logger.info("payment_succeeded", extra={
+            async with asyncio.timeout(1):
+                result = await charge_payment_provider(order_id, amount, simulate_timeout)
+                logger.info("payment_succeeded", extra={
                     "order_id": order_id,
                     "amount": amount
                 })
-            return result
+                return result
         except TimeoutError as exc:
             logger.exception("payment_timeout", extra={
                 "order_id": str(order_id),

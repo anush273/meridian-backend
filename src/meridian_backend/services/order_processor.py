@@ -1,4 +1,5 @@
 from typing import TypedDict
+import asyncio
 
 
 class OrderItem(TypedDict):
@@ -103,3 +104,28 @@ def iter_processed_orders(
     for order in orders:
         yield process_order(order, tax_rate)
 
+
+async def process_sequentially(
+    order: Order,
+    payment_service: PaymentService,
+    inventory_service: InventoryService,
+    shipping_service: ShippingService
+):
+    makePayment = await payment_service.charge(order.id,order.total())
+    reserve = await inventory_service.reserve(order.id)
+    ship = await shipping_service.ship(order.id)
+
+    return makePayment, reserve, ship
+
+
+async def process_concurrently(
+    order: Order,
+    payment_service: PaymentService,
+    inventory_service: InventoryService,
+    shipping_service: ShippingService
+):
+   payment, reserve,shipping = await asyncio.gather(
+    payment_service.charge(order.id, order.total()),
+    inventory_service.reserve(order.id),
+    shipping_service.ship(order.id)
+   )
