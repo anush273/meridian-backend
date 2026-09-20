@@ -1,4 +1,4 @@
-from datetime import  datetime
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -21,7 +21,7 @@ class ProductUpdate(BaseModel):
 class ProductResponse(BaseModel):
     id: UUID
     name: str
-    price: Decimal 
+    price: Decimal
     description: str | None
     created_at: datetime
     updatedAt: datetime | None = None

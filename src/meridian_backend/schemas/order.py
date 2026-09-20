@@ -1,9 +1,9 @@
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 OrderStatus = Literal["PENDING", "PAID", "FAILED"]
 
@@ -14,15 +14,15 @@ class CreateOrderItem(BaseModel):
 
 
 class CreateOrder(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    customer_id: UUID
     items: list[CreateOrderItem] = Field(min_length=1)
-    status: OrderStatus = "PENDING"
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class OrderUpdate(BaseModel):
     items: list[CreateOrderItem] | None = Field(default=None, min_length=1)
     status: OrderStatus | None = None
- 
 
 
 class OrderItemResponse(CreateOrderItem):
@@ -33,7 +33,7 @@ class OrderItemResponse(CreateOrderItem):
 class OrderResponse(BaseModel):
     id: UUID
     customer_id: UUID
-    items: list[OrderItemResponse] = Field(min_length=1)
+    items: list[OrderItemResponse]
     status: OrderStatus
     subtotal: Decimal = Field(ge=0, allow_inf_nan=False)
     tax: Decimal = Field(ge=0, allow_inf_nan=False)
