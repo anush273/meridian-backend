@@ -20,5 +20,5 @@ def get_products(request: Request) -> list[Product]:
     return request.app.state.products
 
 
-def get_order_service() -> OrderService:
-    return OrderService()
+def get_order_service(orders: list[Order], customers: list[Customer], products: list[Product]) -> OrderService:
+    return OrderService(orders,customers,products)
