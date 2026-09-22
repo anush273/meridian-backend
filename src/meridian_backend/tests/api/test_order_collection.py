@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -11,7 +12,7 @@ from meridian_backend.models.product import Product
 @pytest.fixture
 def collection(customer):
     orders = []
-    product = Product(id=uuid4(), name="Book", price=25.0)
+    product = Product(id=uuid4(), name="Book", price=Decimal("25.0"))
     overrides = dict(app.dependency_overrides)
     app.dependency_overrides.update(
         {
@@ -49,8 +50,8 @@ def test_create_then_list_and_get(collection):
     assert body["items"][0]["product_id"] == payload["items"][0]["product_id"]
     assert body["items"][0]["quantity"] == 2
     assert body["subtotal"] == "50.0"
-    assert body["tax"] == "9.0"
-    assert body["total"] == "59.0"
+    assert body["tax"] == "9.000"
+    assert body["total"] == "59.000"
     assert len(orders) == 1
     assert str(orders[0].id) == body["id"]
     assert client.get("/orders").json() == [body]

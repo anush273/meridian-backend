@@ -1,12 +1,12 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-
-from .product import Product
-from .customer import Customer
+from decimal import Decimal
+from uuid import UUID
 
 from meridian_backend.core.exceptions import InvalidOrderStateError
 
-from uuid import UUID
+from .customer import Customer
+from .product import Product
 
 
 @dataclass
@@ -14,7 +14,7 @@ class OrderItem:
     product: Product
     quantity: int
 
-    def subtotal(self) -> float:
+    def subtotal(self) -> Decimal:
         return self.product.price * self.quantity
 
 
@@ -26,13 +26,13 @@ class Order:
     items: list[OrderItem] = field(default_factory=list[OrderItem])
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
-    def subtotal(self) -> float:
-        return sum((item.subtotal() for item in self.items), 0.0)
+    def subtotal(self) -> Decimal:
+        return sum((item.subtotal() for item in self.items), Decimal("0"))
 
-    def tax(self, tax_rate: float = 0.18) -> float:
+    def tax(self, tax_rate: Decimal = Decimal("0.18")) -> Decimal:
         return self.subtotal() * tax_rate
 
-    def total(self, tax_rate: float = 0.18) -> float:
+    def total(self, tax_rate: Decimal = Decimal("0.18")) -> Decimal:
         return self.subtotal() + self.tax(tax_rate)
 
     def mark_paid(self) -> None:

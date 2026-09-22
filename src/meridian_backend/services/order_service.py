@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from meridian_backend.core.exceptions import (
@@ -11,12 +12,10 @@ from meridian_backend.models.product import Product
 
 
 class OrderService:
-    def __init__(self,orders: list[Order],customers: list[Customer], products: list[Product]):
+    def __init__(self, orders: list[Order], customers: list[Customer], products: list[Product]):
         self.orders = orders
         self.customers = customers
         self.products = products
-        
-
 
     def list_orders(self) -> list[Order]:
         return list(self.orders)
@@ -40,18 +39,11 @@ class OrderService:
         self.orders.append(order)
         return order
 
-    def get_paid_orders(
-        self
-    ) -> list[Order]:
+    def get_paid_orders(self) -> list[Order]:
         return [order for order in self.orders if order.status == "PAID"]
 
-    def calculate_revenue(
-        self
-    ) -> float:
-        return sum(
-            (order.total() for order in self.get_paid_orders()),
-            0.0,
-        )
+    def calculate_revenue(self) -> Decimal:
+        return sum((order.total() for order in self.get_paid_orders()), Decimal("0"))
 
     def get_orders_by_customer(
         self,

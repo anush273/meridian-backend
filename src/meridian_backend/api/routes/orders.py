@@ -13,9 +13,9 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 
 @router.get("", response_model=list[OrderResponse])
 def list_orders(
-    servie: Annotated[OrderService, Depends(get_order_service)],
+    service: Annotated[OrderService, Depends(get_order_service)],
 ) -> list[OrderResponse]:
-    return [to_order_response(order) for order in servie.list_orders()]
+    return [to_order_response(order) for order in service.list_orders()]
 
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)

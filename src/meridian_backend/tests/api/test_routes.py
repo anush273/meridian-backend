@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -26,7 +27,7 @@ def test_health(client: TestClient) -> None:
 
 @pytest.mark.parametrize("with_items", [True, False])
 def test_get_order(client: TestClient, customer: Customer, with_items: bool) -> None:
-    product = Product(id=uuid4(), name="Notebook", price=10.0)
+    product = Product(id=uuid4(), name="Notebook", price=Decimal("10.0"))
     order = Order(
         id=uuid4(),
         customer=customer,
@@ -56,9 +57,9 @@ def test_get_order(client: TestClient, customer: Customer, with_items: bool) -> 
         if with_items
         else [],
         "status": "PENDING",
-        "subtotal": "20.0" if with_items else "0.0",
-        "tax": "3.5999999999999996" if with_items else "0.0",
-        "total": "23.6" if with_items else "0.0",
+        "subtotal": "20.0" if with_items else "0",
+        "tax": "3.600" if with_items else "0.00",
+        "total": "23.600" if with_items else "0.00",
         "createdAt": "2026-01-01T00:00:00Z",
         "updatedAt": None,
     }
