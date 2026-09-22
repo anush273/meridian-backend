@@ -7,6 +7,7 @@ from meridian_backend.api.routes.health import router as health_router
 from meridian_backend.api.routes.orders import router as orders_router
 from meridian_backend.core.config import get_settings
 from meridian_backend.core.logging import configure_logging
+from meridian_backend.core.middleware import request_context_middleware
 from meridian_backend.models.customer import Customer
 from meridian_backend.models.order import Order
 from meridian_backend.models.product import Product
@@ -14,6 +15,7 @@ from meridian_backend.models.product import Product
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     orders: list[Order] = []
     customers: list[Customer] = []
     products: list[Product] = []
@@ -35,6 +37,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 register_exception_handlers(app)
+app.middleware("http")(request_context_middleware)
 app.include_router(health_router)
 app.include_router(orders_router)
 
