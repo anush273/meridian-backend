@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from meridian_backend.api.dependencies import get_orders
+from meridian_backend.api.dependencies import get_order_repository
 from meridian_backend.main import app
 from meridian_backend.models.customer import Customer
 from meridian_backend.models.order import Order, OrderItem
@@ -26,8 +26,8 @@ def test_health(client: TestClient) -> None:
 
 
 @pytest.mark.parametrize("with_items", [True, False])
-def test_get_order(client: TestClient, customer: Customer, with_items: bool) -> None:
-    product = Product(id=uuid4(), name="Notebook", price=Decimal("10.0"))
+def test_get_order(client: TestClient, customer: Customer, with_items: bool, seed) -> None:
+    product = Product(id=uuid4(), name="Notebook", price=Decimal("10.00"))
     order = Order(
         id=uuid4(),
         customer=customer,
@@ -35,12 +35,9 @@ def test_get_order(client: TestClient, customer: Customer, with_items: bool) -> 
         items=[OrderItem(product=product, quantity=2)] if with_items else [],
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
-    app.dependency_overrides[get_orders] = lambda: [order]
-    try:
-        response = client.get(f"/orders/{order.id}")
-        repeated = client.get(f"/orders/{order.id}")
-    finally:
-        del app.dependency_overrides[get_orders]
+    seed([customer], [product], [order])
+    response = client.get(f"/orders/{order.id}")
+    repeated = client.get(f"/orders/{order.id}")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -50,16 +47,16 @@ def test_get_order(client: TestClient, customer: Customer, with_items: bool) -> 
             {
                 "product_id": str(product.id),
                 "quantity": 2,
-                "price": "10.0",
-                "subtotal": "20.0",
+                "price": "10.00",
+                "subtotal": "20.00",
             }
         ]
         if with_items
         else [],
         "status": "PENDING",
-        "subtotal": "20.0" if with_items else "0",
-        "tax": "3.600" if with_items else "0.00",
-        "total": "23.600" if with_items else "0.00",
+        "subtotal": "20.00" if with_items else "0",
+        "tax": "3.6000" if with_items else "0.00",
+        "total": "23.6000" if with_items else "0.00",
         "createdAt": "2026-01-01T00:00:00Z",
         "updatedAt": None,
     }
@@ -86,12 +83,12 @@ def test_unexpected_error_returns_generic_500(caplog: pytest.LogCaptureFixture) 
     def failing_orders() -> list[Order]:
         raise RuntimeError("Private failure details")
 
-    app.dependency_overrides[get_orders] = failing_orders
+    app.dependency_overrides[get_order_repository] = failing_orders
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.get("/orders")
     finally:
-        del app.dependency_overrides[get_orders]
+        del app.dependency_overrides[get_order_repository]
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Internal server error"}

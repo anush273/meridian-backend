@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,26 +9,18 @@ from meridian_backend.api.routes.orders import router as orders_router
 from meridian_backend.core.config import get_settings
 from meridian_backend.core.logging import configure_logging
 from meridian_backend.core.middleware import request_context_middleware
-from meridian_backend.models.customer import Customer
-from meridian_backend.models.order import Order
-from meridian_backend.models.product import Product
+from meridian_backend.db.session import create_engine, create_session_factory
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging()
-    orders: list[Order] = []
-    customers: list[Customer] = []
-    products: list[Product] = []
-    app.state.orders = orders
-    app.state.customers = customers
-    app.state.products = products
-
-    yield
-
-    app.state.orders.clear()
-    app.state.customers.clear()
-    app.state.products.clear()
+    engine = create_engine(get_settings().database_url)
+    app.state.session_factory = create_session_factory(engine)
+    try:
+        yield
+    finally:
+        await engine.dispose()
 
 
 settings = get_settings()
