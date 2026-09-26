@@ -16,6 +16,7 @@ A commerce API built with FastAPI, async SQLAlchemy, and PostgreSQL. The impleme
 - [Testing and checks](#testing-and-checks)
 - [Errors and request logging](#errors-and-request-logging)
 - [Current limitations](#current-limitations)
+- [Future work and learning roadmap](#future-work-and-learning-roadmap)
 
 ## Current capabilities
 
@@ -293,3 +294,69 @@ Middleware stores a UUID in `request.state.request_id` and adds `X-Request-ID` t
 - Decimal arithmetic is used, but no explicit currency-rounding policy exists. Product prices are stored as `Numeric(12, 2)`.
 - The highest-order method raises `ValueError` for an empty collection; it is not exposed as an endpoint.
 - Schema migrations are applied explicitly, not during application startup. The health endpoint is not a database readiness check.
+
+## Future work and learning roadmap
+
+This roadmap captures follow-ups from our development discussions and the gaps in the current implementation. It is a proposed sequence, not a record of completed work or a commitment to every feature. Choose a stage explicitly before implementing it.
+
+### Where we are now
+
+We have moved orders from in-memory lists to an async repository, separated ORM-to-domain mapping from API mapping, introduced Decimal calculations, centralized exception handling, and connected database sessions to application lifespan and request dependencies. We have also added cached environment settings, request-context middleware, and an initial Alembic migration.
+
+The next useful milestone is a reproducible PostgreSQL workflow: start with an empty development database, apply migrations, create a customer and product, place an order, and retrieve it after restarting the app.
+
+### 1. Verify the PostgreSQL foundation
+
+- [ ] Apply the existing migrations to a dedicated development/test database and confirm the expected tables and foreign keys exist.
+- [ ] Exercise create, list, and get operations against PostgreSQL, including persistence across app restarts.
+- [ ] Add PostgreSQL integration tests for migrations, foreign-key failures, and transaction rollback. Keep fast SQLite and unit tests for routine feedback.
+- [ ] Enable foreign-key enforcement in SQLite test fixtures so invalid references cannot silently pass there.
+- [ ] Add a credential-free `.env.example` and clarify startup diagnostics for invalid credentials or an unavailable database.
+
+**Learning focus:** distinguish model definitions, migration files, the actual database schema, and the data stored in it. An ORM model change alone does not modify PostgreSQL.
+
+### 2. Complete the customer-to-order workflow
+
+- [ ] Add customer and product repositories, services, and routes, reusing the existing schemas and database mappers where appropriate.
+- [ ] Provide a repeatable development seed command so manual SQL is not required for every API demonstration.
+- [ ] Test the full workflow: create a customer and product, place an order, then retrieve its items and totals.
+- [ ] Decide update and deletion rules for products/customers already referenced by orders before adding those operations.
+
+**Learning focus:** extend one feature through the established layers without moving SQL into routes or exposing ORM objects directly as API responses.
+
+### 3. Preserve financial history and order rules
+
+- [ ] Store the purchase-time unit price on each order item so later product-price changes do not alter historical order totals.
+- [ ] Choose a currency and rounding policy, including whether rounding happens per item, on tax, or on the final total.
+- [ ] Add the corresponding migration, mapper changes, and regression tests together. Decide how existing orders should be backfilled rather than assuming their original prices are known.
+- [ ] Define and persist permitted order-status transitions, with tests for invalid transitions.
+- [ ] Define the expected result when asking for the highest-value order in an empty collection.
+
+**Learning focus:** Decimal handles decimal arithmetic, but business rules still determine rounding, historical prices, and valid state changes.
+
+### 4. Make database reads scale
+
+- [ ] Add bounded pagination to order listing.
+- [ ] Move customer/status filtering and suitable revenue calculations into database queries while keeping their business meaning unchanged.
+- [ ] Review indexes against actual queries and inspect relationship loading for unnecessary queries.
+
+**Learning focus:** distinguish eager loading from loading all records. A repository can fetch complete objects while still restricting which orders it retrieves.
+
+### 5. Improve operational feedback
+
+- [ ] Wire the configured log level into logging initialization.
+- [ ] Include request IDs, paths, status codes, and durations in the rendered logs, and test request-ID propagation on unexpected errors.
+- [ ] Add a separate database readiness check while keeping basic application health lightweight.
+- [ ] Make the package entry point start the intended application, and resolve outstanding project-wide lint/type-check issues.
+
+**Learning focus:** make failures diagnosable across middleware, services, and database access without returning internal error details to clients.
+
+### Later options to scope separately
+
+Payment, inventory, and shipping modules are not yet integrated into the order workflow. Before connecting them, design failure handling, retries, and idempotency so a repeated request cannot charge twice. If an operation spans several repositories, revisit transaction ownership; a database rollback cannot undo an external payment.
+
+Authentication/authorization, automated CI checks, and deployment configuration are additional candidates once the core workflow is reliable. These are future options, not implemented capabilities.
+
+### How to continue learning as we build
+
+For each stage, trace one request through route -> service -> repository -> database and back through the mappers. Explain what belongs in each layer, add tests for the behavior and failure cases, and update this README when the behavior changes. Use the [relationships guide](docs/database-relationships-guide.pdf) when revisiting foreign keys and ORM navigation.
