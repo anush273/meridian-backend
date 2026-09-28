@@ -72,7 +72,7 @@ flowchart TD
 
 ### 5. Repositories: database access
 
-`repositories/order_repository.py` owns SQLAlchemy queries and persistence. It loads the required relationships before returning domain objects. It also commits newly created orders and rolls back failed writes.
+`repositories/order_repository.py` owns SQLAlchemy queries and persistence. It loads the required relationships before returning domain objects. It flushes newly created orders; `OrderService.create_order()` owns commit and rollback.
 
 **Why:** SQL and relationship-loading decisions stay in one place. The rest of the application works with domain objects rather than accessing ORM attributes that might trigger additional database queries.
 
@@ -130,7 +130,7 @@ For `POST /orders`:
 3. The service asks the repository for the customer and requested products.
 4. Missing references produce a domain error, which the API converts to a 404.
 5. The service constructs a pending domain order with a new UUID.
-6. The repository constructs ORM order and item objects and commits them together.
+6. The repository constructs and flushes ORM order and item objects. `OrderService.create_order()` commits the transaction before returning.
 7. The API mapper builds the response, including Decimal subtotal, tax, and total.
 8. The session closes when the dependency exits.
 
@@ -163,11 +163,11 @@ For a detailed explanation with examples and exercises, see the [database relati
 
 App startup creates one async engine and session factory per application process. A dependency opens an `AsyncSession` for each request that needs database access. Shutdown disposes the engine.
 
-The repository's `add()` method currently owns the write transaction: it commits an order and its items together, and rolls back on failure. The session dependency handles session cleanup; it does not automatically commit requests.
+`OrderService.create_order()` wraps customer/product lookups and order creation in `async with self.session.begin()`: success commits before returning, and exceptions roll back. All three repositories share this session. Repository `add()` methods flush changes without committing. The session dependency only opens and closes the session.
 
 **Why async:** database waits can yield control to other requests. It does not make an individual SQL query faster. Keep each session scoped to its request rather than sharing one session globally.
 
-**Tradeoff:** repository-owned commits are simple for the current create-order operation. If a future operation must atomically write through several repositories, move transaction ownership to that coordinating operation or a unit-of-work abstraction.
+**Outside HTTP requests:** `create_order()` still owns its transaction. Pass the same session to the service and all its repositories, with no transaction already active. Direct repository writes require a caller-owned transaction, for example `async with session.begin():`.
 
 ## Configuration and local setup
 

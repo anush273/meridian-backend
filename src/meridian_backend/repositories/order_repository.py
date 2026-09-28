@@ -4,15 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from meridian_backend.db.mappers import (
-    customer_model_to_domain,
-    order_model_to_domain,
-    product_model_to_domain,
-)
-from meridian_backend.db.models import CustomerModel, OrderItemModel, OrderModel, ProductModel
-from meridian_backend.models.customer import Customer
+from meridian_backend.db.mappers import order_model_to_domain
+from meridian_backend.db.models import OrderItemModel, OrderModel
 from meridian_backend.models.order import Order
-from meridian_backend.models.product import Product
 
 
 class OrderRepository:
@@ -36,18 +30,6 @@ class OrderRepository:
         model = await self.session.scalar(self._order_query().where(OrderModel.id == order_id))
         return order_model_to_domain(model) if model is not None else None
 
-    async def get_customer(self, customer_id: UUID) -> Customer | None:
-        model = await self.session.get(CustomerModel, customer_id)
-        if model is None:
-            return None
-        return customer_model_to_domain(model)
-
-    async def get_products(self, product_ids: list[UUID]) -> dict[UUID, Product]:
-        models = await self.session.scalars(
-            select(ProductModel).where(ProductModel.id.in_(product_ids))
-        )
-        return {model.id: product_model_to_domain(model) for model in models}
-
     async def add(self, order: Order) -> None:
         model = OrderModel(
             id=order.id,
@@ -59,9 +41,5 @@ class OrderRepository:
                 for item in order.items
             ],
         )
-        try:
-            self.session.add(model)
-            await self.session.commit()
-        except Exception:
-            await self.session.rollback()
-            raise
+        self.session.add(model)
+        await self.session.flush()
