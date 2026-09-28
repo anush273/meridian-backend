@@ -46,3 +46,13 @@ class ProductNotFoundError(OrderError):
     def __init__(self, product_id: UUID) -> None:
         self.product_id = product_id
         super().__init__(f"Product {product_id} not found")
+
+
+class UserAlreadyExistsError(MeridianError):
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(f"{email} already exists")
+
+class UserDoesNotExist(MeridianError):
+    def __init__(self, email:str) -> None:
+        super().__init__(f"User {email} does not exist")

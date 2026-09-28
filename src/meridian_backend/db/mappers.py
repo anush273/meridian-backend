@@ -2,10 +2,12 @@
 
 from datetime import UTC
 
-from meridian_backend.db.models import CustomerModel, OrderItemModel, OrderModel, ProductModel
+from meridian_backend.db.models import CustomerModel, OrderItemModel, OrderModel, ProductModel, UserModel
 from meridian_backend.models.customer import Customer
 from meridian_backend.models.order import Order, OrderItem
 from meridian_backend.models.product import Product
+from meridian_backend.models.user import User
+
 
 
 def customer_model_to_domain(model: CustomerModel) -> Customer:
@@ -31,4 +33,15 @@ def order_model_to_domain(model: OrderModel) -> Order:
             else model.created_at
         ),
         items=[order_item_model_to_domain(item) for item in model.items],
+    )
+
+
+def user_model_to_domain(model: UserModel):
+    return User(
+        id=model.id,
+        name=model.name,
+        email= model.email,
+        password_hash= model.password_hash,
+        role= model.role,
+        is_active= model.is_active
     )

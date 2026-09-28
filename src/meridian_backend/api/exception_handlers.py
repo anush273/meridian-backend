@@ -7,6 +7,8 @@ from meridian_backend.core.exceptions import (
     CustomerNotFoundError,
     OrderNotFoundError,
     ProductNotFoundError,
+    UserAlreadyExistsError,
+    UserDoesNotExist
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 
 def register_exception_handlers(app: FastAPI) -> None:
-    for exception_class in (CustomerNotFoundError, OrderNotFoundError, ProductNotFoundError):
+    for exception_class in (CustomerNotFoundError, OrderNotFoundError, ProductNotFoundError, UserAlreadyExistsError,UserDoesNotExist):
         app.add_exception_handler(exception_class, not_found_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
