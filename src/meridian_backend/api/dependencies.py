@@ -8,6 +8,8 @@ from meridian_backend.core.config import Settings, get_settings
 from meridian_backend.repositories.customer_repository import CustomerRepository
 from meridian_backend.repositories.order_repository import OrderRepository
 from meridian_backend.repositories.product_repository import ProductRepository
+from meridian_backend.repositories.user_repository import UserRepository
+from meridian_backend.services.auth_service import AuthService
 from meridian_backend.services.order_service import OrderService
 
 SettingService = Annotated[Settings, Depends(get_settings)]
@@ -51,3 +53,13 @@ def get_order_service(
     session: DbSessionDep,
 ) -> OrderService:
     return OrderService(repository, customer_repository, product_repository, session)
+
+
+def get_user_repository(session: DbSessionDep) -> UserRepository:
+    return UserRepository(session)
+
+
+def get_auth_service(
+    user_repository: Annotated[UserRepository, Depends(get_user_repository)], session: DbSessionDep
+) -> AuthService:
+    return AuthService(user_repository, session)

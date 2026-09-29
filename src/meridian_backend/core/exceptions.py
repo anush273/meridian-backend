@@ -48,11 +48,26 @@ class ProductNotFoundError(OrderError):
         super().__init__(f"Product {product_id} not found")
 
 
-class UserAlreadyExistsError(MeridianError):
+class AuthError(MeridianError):
+    """Base exception for authentication and registration failures."""
+
+
+class InvalidCredentialsError(AuthError):
+    def __init__(self) -> None:
+        super().__init__("Invalid email or password")
+
+
+class InactiveUserError(AuthError):
+    def __init__(self) -> None:
+        super().__init__("User account is inactive")
+
+
+class UserAlreadyExistsError(AuthError):
     def __init__(self, email: str) -> None:
         self.email = email
         super().__init__(f"{email} already exists")
 
-class UserDoesNotExist(MeridianError):
-    def __init__(self, email:str) -> None:
+
+class UserDoesNotExist(AuthError):
+    def __init__(self, email: str) -> None:
         super().__init__(f"User {email} does not exist")
