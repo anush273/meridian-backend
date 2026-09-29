@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from uuid import UUID
 
 from meridian_backend.core.exceptions import UserAlreadyExistsError
 from meridian_backend.db.mappers import user_model_to_domain
@@ -25,8 +26,14 @@ class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
 
+
     async def get_by_email(self, email: str) -> User | None:
         query = select(UserModel).where(UserModel.email == email)
+        model = await self.session.scalar(query)
+        return user_model_to_domain(model) if model is not None else None
+    
+    async def get_by_id(self, user_id: UUID) -> User | None:
+        query = select(UserModel).where(UserModel.id == user_id)
         model = await self.session.scalar(query)
         return user_model_to_domain(model) if model is not None else None
 

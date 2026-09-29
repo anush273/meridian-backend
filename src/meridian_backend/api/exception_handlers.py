@@ -6,11 +6,13 @@ from fastapi.responses import JSONResponse
 from meridian_backend.core.exceptions import (
     CustomerNotFoundError,
     InactiveUserError,
+    InvalidAccessTokenError,
     InvalidCredentialsError,
     OrderNotFoundError,
     ProductNotFoundError,
     UserAlreadyExistsError,
     UserDoesNotExist,
+    PermissionDeniedError
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,20 @@ async def invalid_credentials_exception_handler(request: Request, exc: Exception
 async def inactive_user_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": str(exc)})
 
+
+async def invalid_access_token_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": str(exc)},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def permission_denied_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code= status.HTTP_403_FORBIDDEN,
+        content={"detail": str(exc)}
+    )
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.error(
@@ -60,3 +76,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(InvalidCredentialsError, invalid_credentials_exception_handler)
     app.add_exception_handler(InactiveUserError, inactive_user_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
+    app.add_exception_handler(PermissionDeniedError, permission_denied_exception_handler)
+    app.add_exception_handler(InvalidAccessTokenError, invalid_access_token_exception_handler)

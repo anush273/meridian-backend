@@ -1,10 +1,12 @@
 from unittest.mock import AsyncMock
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from meridian_backend.core.config import get_settings
 from meridian_backend.core.security import verify_password
 from meridian_backend.db.models import UserModel
 from meridian_backend.main import app
@@ -67,7 +69,7 @@ def test_invalid_registration_does_not_persist(database, payload, field, value):
         assert session.scalar(select(UserModel)) is None
 
 
-def test_login_returns_registered_user(payload):
+def test_login_returns_access_token(payload):
     with TestClient(app) as client:
         registered = client.post("/register", json=payload)
         response = client.post(
@@ -79,7 +81,14 @@ def test_login_returns_registered_user(payload):
         )
     assert registered.status_code == 201
     assert response.status_code == 200
-    assert response.json() == registered.json()
+    settings = get_settings()
+    body = response.json()
+    assert body["token_type"] == "bearer"
+    claims = jwt.decode(
+        body["access_token"], settings.jwt_secret_key, algorithms=[settings.jwt_algorithm]
+    )
+    assert claims["sub"] == registered.json()["id"]
+    assert "exp" in claims
     assert "password_hash" not in response.json()
 
 
@@ -128,3 +137,48 @@ def test_login_inactive_user(database, payload):
 def test_login_invalid_payload(payload):
     with TestClient(app) as client:
         assert client.post("/login", json=payload).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "case", ["malformed", "wrong_signature", "expired", "missing_sub", "missing_exp", "bad_sub"]
+)
+def test_me_rejects_invalid_access_token(case):
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    settings = get_settings()
+    claims = {"sub": str(uuid4()), "exp": datetime.now(UTC) + timedelta(minutes=5)}
+    key = settings.jwt_secret_key
+    if case == "expired":
+        claims["exp"] = datetime.now(UTC) - timedelta(minutes=5)
+    elif case == "missing_sub":
+        del claims["sub"]
+    elif case == "missing_exp":
+        del claims["exp"]
+    elif case == "bad_sub":
+        claims["sub"] = "not-a-uuid"
+    elif case == "wrong_signature":
+        key = "different-signing-key-with-at-least-32-characters"
+    token = (
+        "invalid-token"
+        if case == "malformed"
+        else jwt.encode(claims, key, algorithm=settings.jwt_algorithm)
+    )
+    with TestClient(app) as client:
+        response = client.get("/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid access token"}
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_me_accepts_login_token(payload):
+    with TestClient(app) as client:
+        registered = client.post("/register", json=payload)
+        login = client.post(
+            "/login", json={"email": payload["email"], "password": payload["password"]}
+        )
+        response = client.get(
+            "/me", headers={"Authorization": f"Bearer {login.json()['access_token']}"}
+        )
+    assert response.status_code == 200
+    assert response.json() == registered.json()

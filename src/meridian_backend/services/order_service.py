@@ -7,11 +7,14 @@ from meridian_backend.core.exceptions import (
     CustomerNotFoundError,
     OrderNotFoundError,
     ProductNotFoundError,
+    PermissionDeniedError
 )
 from meridian_backend.models.order import Order, OrderItem
 from meridian_backend.repositories.customer_repository import CustomerRepository
 from meridian_backend.repositories.order_repository import OrderRepository
 from meridian_backend.repositories.product_repository import ProductRepository
+from meridian_backend.models.user import User, UserRole
+
 
 
 class OrderService:
@@ -67,8 +70,12 @@ class OrderService:
     async def get_highest_order(self) -> Order:
         return max(await self.list_orders(), key=lambda order: order.total())
 
-    async def get_order_by_id(self, order_id: UUID) -> Order:
+    async def get_order_by_id(self, order_id: UUID, actor: User) -> Order:
         order = await self.order_repository.get_by_id(order_id)
         if order is None:
             raise OrderNotFoundError(order_id)
+        if actor.role == UserRole.ADMIN:
+            return order
+        if actor.customer_id != order.customer.id:
+            raise PermissionDeniedError()
         return order

@@ -13,6 +13,10 @@ class PaymentError(MeridianError):
     """Base exceptions for payment related failures"""
 
 
+class PermissionDeniedError(MeridianError):
+    """Base exceptions for permission related failures"""
+
+
 class OrderNotFoundError(OrderError):
     def __init__(self, order_id: UUID) -> None:
         self.order_id = order_id
@@ -57,6 +61,10 @@ class InvalidCredentialsError(AuthError):
         super().__init__("Invalid email or password")
 
 
+class WrongPasswordError(InvalidCredentialsError):
+    """Password verification failed; keep the public credentials message generic."""
+
+
 class InactiveUserError(AuthError):
     def __init__(self) -> None:
         super().__init__("User account is inactive")
@@ -71,3 +79,10 @@ class UserAlreadyExistsError(AuthError):
 class UserDoesNotExist(AuthError):
     def __init__(self, email: str) -> None:
         super().__init__(f"User {email} does not exist")
+
+
+class InvalidAccessTokenError(MeridianError):
+    def __init__(self) -> None:
+        super().__init__(f"Invalid access token")
+
+

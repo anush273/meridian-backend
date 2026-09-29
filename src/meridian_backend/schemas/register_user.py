@@ -16,3 +16,13 @@ class UserResponse(BaseModel):
     email: EmailStr
     role: str
     is_active: bool
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class LoginUser(BaseModel):
+    email: EmailStr
+    password: str

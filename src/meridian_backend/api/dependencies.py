@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 from fastapi import Depends, Request
+from fastapi.security import (HTTPBearer,HTTPAuthorizationCredentials)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meridian_backend.core.config import Settings, get_settings
@@ -11,9 +12,14 @@ from meridian_backend.repositories.product_repository import ProductRepository
 from meridian_backend.repositories.user_repository import UserRepository
 from meridian_backend.services.auth_service import AuthService
 from meridian_backend.services.order_service import OrderService
+from meridian_backend.models.user import User, UserRole
+from meridian_backend.core.security import decode_access_token
+from meridian_backend.core.exceptions import InvalidAccessTokenError, InactiveUserError, PermissionDeniedError
+
 
 SettingService = Annotated[Settings, Depends(get_settings)]
 
+bearer_scheme = HTTPBearer()
 
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
     """Provide a shared session; services own write transactions."""
@@ -60,6 +66,32 @@ def get_user_repository(session: DbSessionDep) -> UserRepository:
 
 
 def get_auth_service(
-    user_repository: Annotated[UserRepository, Depends(get_user_repository)], session: DbSessionDep
+    user_repository: Annotated[UserRepository, Depends(get_user_repository)], session: DbSessionDep, settings: SettingService
 ) -> AuthService:
-    return AuthService(user_repository, session)
+    return AuthService(user_repository, session, settings)
+
+
+UserRepositoryDep = Annotated[UserRepository, Depends(get_user_repository)]
+
+
+async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)], user_repository: UserRepositoryDep, settings: SettingService) -> User:
+    user_id = decode_access_token(credentials.credentials,settings)
+    user = await user_repository.get_by_id(user_id)
+
+    if user is None:
+        raise InvalidAccessTokenError()
+    
+    if not user.is_active:
+        raise InactiveUserError()
+    
+    return user
+
+CurrentUserDep = Annotated[User, Depends(get_current_user)]
+
+async def require_admin(current_user: CurrentUserDep) -> User:
+    if current_user.role != UserRole.ADMIN:
+        raise PermissionDeniedError()
+    return current_user
+
+
+AdminUserDep = Annotated[User, Depends(require_admin)]
