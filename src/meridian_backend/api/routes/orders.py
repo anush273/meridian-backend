@@ -1,9 +1,9 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, status, Header
 
-from meridian_backend.api.dependencies import get_order_service
+from meridian_backend.api.dependencies import get_order_service, CurrentUserDep
 from meridian_backend.api.mappers import to_order_response
 from meridian_backend.schemas.order import CreateOrder, OrderResponse
 from meridian_backend.services.order_service import OrderService
@@ -20,18 +20,20 @@ async def list_orders(
 
 @router.post("", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def create_order(
-    payload: CreateOrder, service: Annotated[OrderService, Depends(get_order_service)]
+    payload: CreateOrder, service: Annotated[OrderService, Depends(get_order_service)], current_user: CurrentUserDep,idempotency_key: Annotated[str, Header(alias="Idempotency-key")]
 ) -> OrderResponse:
     order = await service.create_order(
         customer_id=payload.customer_id,
         items=[(item.product_id, item.quantity) for item in payload.items],
+        actor=current_user,
+        idempotency_key=idempotency_key
     )
     return to_order_response(order)
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
 async def get_order(
-    order_id: UUID, service: Annotated[OrderService, Depends(get_order_service)]
+    order_id: UUID, current_user: CurrentUserDep, service: Annotated[OrderService, Depends(get_order_service)]
 ) -> OrderResponse:
-    order = await service.get_order_by_id(order_id)
+    order = await service.get_order_by_id(order_id, actor=current_user)
     return to_order_response(order)

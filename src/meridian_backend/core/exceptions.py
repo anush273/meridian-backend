@@ -13,6 +13,10 @@ class PaymentError(MeridianError):
     """Base exceptions for payment related failures"""
 
 
+class PermissionDeniedError(MeridianError):
+    """Base exceptions for permission related failures"""
+
+
 class OrderNotFoundError(OrderError):
     def __init__(self, order_id: UUID) -> None:
         self.order_id = order_id
@@ -46,3 +50,39 @@ class ProductNotFoundError(OrderError):
     def __init__(self, product_id: UUID) -> None:
         self.product_id = product_id
         super().__init__(f"Product {product_id} not found")
+
+
+class AuthError(MeridianError):
+    """Base exception for authentication and registration failures."""
+
+
+class InvalidCredentialsError(AuthError):
+    def __init__(self) -> None:
+        super().__init__("Invalid email or password")
+
+
+class WrongPasswordError(InvalidCredentialsError):
+    """Password verification failed; keep the public credentials message generic."""
+
+
+class InactiveUserError(AuthError):
+    def __init__(self) -> None:
+        super().__init__("User account is inactive")
+
+
+class UserAlreadyExistsError(AuthError):
+    def __init__(self, email: str) -> None:
+        self.email = email
+        super().__init__(f"{email} already exists")
+
+
+class UserDoesNotExist(AuthError):
+    def __init__(self, email: str) -> None:
+        super().__init__(f"User {email} does not exist")
+
+
+class InvalidAccessTokenError(MeridianError):
+    def __init__(self) -> None:
+        super().__init__(f"Invalid access token")
+
+

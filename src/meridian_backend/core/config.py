@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = Field(...)
 
+    jwt_secret_key: str = Field(...)
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
