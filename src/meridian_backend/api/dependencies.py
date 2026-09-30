@@ -15,6 +15,7 @@ from meridian_backend.services.order_service import OrderService
 from meridian_backend.models.user import User, UserRole
 from meridian_backend.core.security import decode_access_token
 from meridian_backend.core.exceptions import InvalidAccessTokenError, InactiveUserError, PermissionDeniedError
+from meridian_backend.repositories.idempotency_repository import IdempotencyRepository
 
 
 SettingService = Annotated[Settings, Depends(get_settings)]
@@ -51,14 +52,21 @@ def get_product_repository(session: DbSessionDep) -> ProductRepository:
 
 ProductRepositoryDep = Annotated[ProductRepository, Depends(get_product_repository)]
 
+def get_idempotency_repository(session: DbSessionDep) -> IdempotencyRepository:
+    return IdempotencyRepository(session)
+
+IdempotencyRepositoryDep = Annotated[IdempotencyRepository, Depends(get_idempotency_repository)]
+
 
 def get_order_service(
     repository: OrderRepositoryDep,
     customer_repository: CustomerRepositoryDep,
     product_repository: ProductRepositoryDep,
     session: DbSessionDep,
+    idempotency_repository: IdempotencyRepositoryDep
+
 ) -> OrderService:
-    return OrderService(repository, customer_repository, product_repository, session)
+    return OrderService(repository, customer_repository, product_repository, session, idempotency_repository)
 
 
 def get_user_repository(session: DbSessionDep) -> UserRepository:
@@ -74,7 +82,18 @@ def get_auth_service(
 UserRepositoryDep = Annotated[UserRepository, Depends(get_user_repository)]
 
 
-async def get_current_user(credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)], user_repository: UserRepositoryDep, settings: SettingService) -> User:
+async def get_authentication_user_repository(request: Request) -> AsyncIterator[UserRepository]:
+    """Keep authentication reads separate from service-owned write transactions."""
+    session_factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
+    async with session_factory() as session:
+        yield UserRepository(session)
+
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+    user_repository: Annotated[UserRepository, Depends(get_authentication_user_repository)],
+    settings: SettingService,
+) -> User:
     user_id = decode_access_token(credentials.credentials,settings)
     user = await user_repository.get_by_id(user_id)
 

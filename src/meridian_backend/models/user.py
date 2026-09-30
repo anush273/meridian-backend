@@ -15,5 +15,5 @@ class User:
     email:str
     password_hash: str
     role: UserRole
-    customer_id: UUID | None
+    customer_id: UUID | None = None
     is_active: bool = True

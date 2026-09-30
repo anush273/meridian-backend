@@ -43,5 +43,6 @@ def user_model_to_domain(model: UserModel):
         email= model.email,
         password_hash= model.password_hash,
         role= model.role,
+        customer_id=model.customer_id,
         is_active= model.is_active
     )

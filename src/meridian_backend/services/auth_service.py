@@ -11,8 +11,9 @@ from meridian_backend.core.exceptions import (
     WrongPasswordError,
 )
 from meridian_backend.core.security import create_access_token, hash_password, verify_password
-from meridian_backend.models.user import User
+from meridian_backend.models.user import User, UserRole
 from meridian_backend.repositories.user_repository import UserRepository
+
 
 
 class AuthService:
@@ -39,7 +40,7 @@ class AuthService:
                 name=name,
                 email=email,
                 password_hash=hash_password(password),
-                role="ADMIN",
+                role=UserRole.CUSTOMER,
                 is_active=True,
             )
             await self.user_repository.add(user)
