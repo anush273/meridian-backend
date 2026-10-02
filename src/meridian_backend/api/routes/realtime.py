@@ -86,7 +86,7 @@ async def realtime_socket(websocket: WebSocket, session_id: UUID | None = None) 
         logger.info("websocket_disconnected", extra={"connection_id": str(connection_id)})
 
     finally:
-        manager.disconnect(connection_id)
+        await manager.disconnect(connection_id)
         logger.info(
             "live_connections=%s",
             manager.connection_count,
