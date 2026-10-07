@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import WebSocket
 
-from meridian_backend.voice.stt import fake_stt
+from meridian_backend.voice.stt import FakeStreamingSTT
 from meridian_backend.voice.vad import FakeVAD, TurnEvent, VADEvent
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,12 @@ class SessionState(StrEnum):
 class TextStreamEnd(Enum):
     END_OF_STREAM = "end_of_stream"
 
+
+class AudioStreamControl(Enum):
+    AUDIO_TURN_END = "audio_turn_end"
+
+
+AUDIO_TURN_END = AudioStreamControl.AUDIO_TURN_END
 
 TEXT_END_OF_STREAM = TextStreamEnd.END_OF_STREAM
 
@@ -46,12 +52,15 @@ async def fake_business_task() -> None:
 @dataclass
 class VoiceSession:
     session_id: UUID
-    audio_queue: asyncio.Queue[bytes] = field(default_factory=lambda: asyncio.Queue(maxsize=5))
+    audio_queue: asyncio.Queue[bytes | AudioStreamControl] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=5)
+    )
     stt_task: asyncio.Task[None] | None = None
     vad: FakeVAD = field(default_factory=FakeVAD)
     state: SessionState = field(default=SessionState.IDLE, init=False)
     # Incoming audio stays in audio_queue; only stale agent output is discarded.
     agent_audio_queue: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
+    agent_audio_sender_task: asyncio.Task[None] | None = field(default=None, init=False)
     text_queue: asyncio.Queue[str | TextStreamEnd] = field(
         default_factory=lambda: asyncio.Queue(maxsize=10)
     )
@@ -188,6 +197,8 @@ class VoiceSession:
                 self.state = SessionState.IDLE
         if cancelled_tasks is not None:
             await self._cancel_agent_output(cancelled_tasks)
+        if result == TurnEvent.USER_TURN_COMPLETE:
+            await self.audio_queue.put(AUDIO_TURN_END)
         return result
 
     async def _cancel_agent_output(self, tasks: list[asyncio.Task[None]]) -> None:
@@ -213,8 +224,30 @@ class VoiceSession:
                         self.agent_audio_queue.task_done()
                 self._agent_output_cancelling = False
 
+    async def send_agent_audio(
+        self, send_audio: Callable[[bytes], Awaitable[None]]
+    ) -> None:
+        """Send queued agent audio for the session, independently of agent turns."""
+        task = asyncio.current_task()
+        if self.agent_audio_sender_task is not None and not self.agent_audio_sender_task.done():
+            if self.agent_audio_sender_task is not task:
+                raise RuntimeError("An agent audio sender is already active")
+        self.agent_audio_sender_task = task
+        try:
+            while True:
+                chunk = await self.agent_audio_queue.get()
+                try:
+                    await send_audio(chunk)
+                finally:
+                    self.agent_audio_queue.task_done()
+        finally:
+            if self.agent_audio_sender_task is task:
+                self.agent_audio_sender_task = None
+
     async def receive_audio(
-        self, websocket: WebSocket, audio_queue: asyncio.Queue[bytes] | None = None
+        self,
+        websocket: WebSocket,
+        audio_queue: asyncio.Queue[bytes | AudioStreamControl] | None = None,
     ) -> None:
         queue = self.audio_queue if audio_queue is None else audio_queue
         while True:
@@ -223,14 +256,19 @@ class VoiceSession:
 
     async def process_audio(
         self,
-        audio_queue: asyncio.Queue[bytes] | None = None,
+        audio_queue: asyncio.Queue[bytes | AudioStreamControl] | None = None,
         *,
-        send_audio: Callable[[bytes], Awaitable[None]] = fake_stt,
+        stt: FakeStreamingSTT | None = None,
     ) -> None:
         queue = self.audio_queue if audio_queue is None else audio_queue
+        stt = FakeStreamingSTT() if stt is None else stt
         while True:
             chunk = await queue.get()
             try:
-                await send_audio(chunk)
+                if chunk is AUDIO_TURN_END:
+                    transcript = await stt.finalize()
+                    await self.start_agent_turn(transcript)
+                elif isinstance(chunk, bytes):
+                    await stt.send_audio(chunk)
             finally:
                 queue.task_done()

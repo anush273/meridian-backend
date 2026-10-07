@@ -39,7 +39,7 @@ The order service also has methods for paid orders, revenue, customer filters, a
 
 The seed script creates a customer and two products. Customer and product repositories exist. Customer and product CRUD routes are not registered. `api/routes/customer.py` is empty.
 
-Payment, inventory, and shipping services simulate external operations. The order routes do not call them. Voice processing is also simulated and has no registered endpoint.
+Payment, inventory, and shipping services simulate external operations. The order routes do not call them. Voice processing is simulated. The real-time route starts its output sender, but does not start audio input or turn processing.
 
 ## Architecture and rationale
 
@@ -197,25 +197,60 @@ To resume a disconnected session, connect to `/realtime/ws?session_id=<session-u
 
 The connection manager provides `send_session_message()` for server updates. It assigns sequences from 1 and retains messages until acknowledgement. An acknowledgement removes all pending messages through that sequence. Reconnection replays the remaining messages in order. Ping and echo replies use direct sends and are not retained for replay. The current routes do not publish order or voice updates through `send_session_message()`.
 
-Each connection has an outbound queue of 100 messages and a sender task. A full queue disconnects the connection. Each session can retain 1,000 pending messages by default. A full pending buffer raises `BufferError`.
+`send_json()` and `send_bytes()` put frames into the same outbound queue. One sender task chooses `websocket.send_json()` or `websocket.send_bytes()` from the frame type. All JSON and binary writes use this single writer.
+
+`send_session_audio(session_id, payload)` sends live binary audio. It does not assign sequence numbers or store audio in `pending_messages`. Audio is dropped while the session is disconnected or waiting for replay. An unknown session raises `ValueError`. Audio is never replayed.
+
+A caller can send JSON `agent.speaking`, await audio delivery, then send JSON `agent.finished`. The shared queue preserves enqueue order. These event types are an example; the route does not generate them automatically.
+
+```text
+JSON agent.speaking -> BINARY chunks -> JSON agent.finished
+                  one outbound queue
+                  one sender task
+                  one WebSocket writer
+```
+
+Each connection has an outbound queue of 100 frames and a sender task. A full queue disconnects the connection. Each session can retain 1,000 pending messages by default. A full pending buffer raises `BufferError`.
 
 Sessions remain in process memory. Disconnected sessions expire after 1,800 seconds without activity. A background task checks expiration every 60 seconds. Application shutdown stops cleanup and waits for connection sender tasks. Session resume does not survive a process restart or work across separate worker processes.
 
 ## Voice simulation
 
-`voice/session.py` defines `VoiceSession`. It is not connected to `/realtime/ws` or another route. The code simulates voice processing for tests and development.
+`voice/session.py` defines `VoiceSession`. The code simulates voice processing for tests and development. After ready and replay, `/realtime/ws` creates a voice session and starts its audio sender. The route injects a callback that calls `manager.send_session_audio()`. On disconnect, the route cancels and awaits the audio sender.
 
-- Incoming binary audio uses a queue with a capacity of five chunks. Producers wait when the queue is full.
-- `process_audio()` sends each chunk to a supplied callback. The default fake STT callback waits one second and produces no transcript.
+The voice pipeline uses explicit turn boundaries:
+
+```text
+Incoming bytes -> audio_queue -> FakeStreamingSTT.send_audio(chunk)
+VAD USER_TURN_COMPLETE -> AUDIO_TURN_END in audio_queue
+AUDIO_TURN_END -> STT.finalize() -> transcript -> start_agent_turn(transcript)
+Fake LLM -> text_queue -> fake TTS -> agent_audio_queue
+Voice audio sender -> injected callback -> manager outbound_queue -> WebSocket writer
+```
+
+- `audio_queue` holds bytes or the `AudioStreamControl` sentinel `AUDIO_TURN_END`. Its capacity is five items. Producers wait when it is full.
+- `FakeStreamingSTT.send_audio()` waits one second per chunk and collects the bytes. `finalize()` joins and decodes them as UTF-8, then clears the buffer for the next turn. This is simulated transcription.
 - `FakeVAD` accepts explicit speech and silence events. It completes a user turn after 500 milliseconds of consecutive silence by default.
-- The session has `IDLE`, `AGENT_SPEAKING`, and `USER_SPEAKING` states.
-- `start_agent_turn()` starts simulated LLM and TTS tasks. It requires the `IDLE` state.
+- On turn completion, the VAD handler sets the session to `IDLE`. It enqueues `AUDIO_TURN_END` outside `_turn_lock`, so queue backpressure does not hold the turn lock.
+- `process_audio()` sends byte chunks to STT. On the sentinel, it finalizes STT and starts an agent turn with the transcript.
+- The session has `IDLE`, `AGENT_SPEAKING`, and `USER_SPEAKING` states. `start_agent_turn()` requires `IDLE`.
 - The fake LLM streams a fixed response. Fake TTS encodes text as UTF-8 bytes. These bytes are not playable speech audio.
 - A text queue with a capacity of ten chunks connects LLM output to TTS. An explicit end-of-stream marker stops TTS.
-- Speech during an agent turn cancels LLM and TTS tasks. It clears pending agent text and audio. It preserves incoming audio and independent business work.
+- `send_agent_audio(callback)` waits for a queued audio chunk, awaits the callback, and calls `task_done()`. It repeats until cancelled or a send fails. `agent_audio_sender_task` tracks its lifecycle.
+- Speech during an agent turn cancels LLM and TTS tasks. It clears pending agent text and audio. The audio sender remains running. Incoming audio and independent business work are preserved.
+- A chunk already passed to the send callback can finish after barge-in. Queue cleanup does not retract an in-flight send.
 - Provider failure logs the error, cancels the other output task, and clears pending output.
 
-The module has methods to receive binary audio and process chunks. No route starts these methods or sends queued agent audio to a client. Real STT, LLM, TTS, and audio-based VAD providers are not configured.
+Normal simulated output contains these chunks in order:
+
+```text
+sent: b"Your "
+sent: b"order "
+sent: b"was "
+sent: b"shipped."
+```
+
+The route still receives JSON messages only. It does not start binary audio reception, `process_audio()`, VAD handling, or agent turns. Thus, output delivery is connected, but a complete client voice conversation is not available yet. Each connection creates a new voice session; voice state is not restored on reconnect. Real STT, LLM, TTS, and audio-based VAD providers are not configured.
 
 ## Database relationships
 
@@ -391,7 +426,7 @@ Settings require a database URL and JWT secret during app import. To run tests w
 DATABASE_URL=sqlite+aiosqlite:///:memory: JWT_SECRET_KEY=test-only-secret-do-not-use-in-production uv run pytest -q
 ```
 
-API fixtures replace the engine with a temporary SQLite database and create tables from metadata. Unit tests cover domain behavior and service behavior with mocked repositories. Session tests check lifecycle cleanup. Auth tests cover registration, login, and token checks. A dedicated order test covers authenticated creation, rollback, and idempotent replay. Real-time tests cover session resume, acknowledgement, queues, and cleanup. Voice tests cover turn detection, interruption, streaming, and provider failures.
+API fixtures replace the engine with a temporary SQLite database and create tables from metadata. Unit tests cover domain behavior and service behavior with mocked repositories. Session tests check lifecycle cleanup. Auth tests cover registration, login, and token checks. A dedicated order test covers authenticated creation, rollback, and idempotent replay. Real-time tests cover session resume, acknowledgement, queues, cleanup, mixed JSON/binary ordering, and live-only audio. Voice tests cover turn detection, STT finalization, interruption, streaming, audio sender lifecycle, and provider failures.
 
 Some older order tests still use earlier service signatures or omit required auth and idempotency headers. They need updates before the full suite can serve as a passing check.
 
@@ -421,8 +456,9 @@ Middleware stores a UUID in `request.state.request_id`. It adds `X-Request-ID` t
 - Idempotency keys are scoped to user and operation. Reused keys return the original order without request-body comparison. There is no expiry or cleanup policy.
 - The idempotency claim uses PostgreSQL `ON CONFLICT`. SQLite tests do not establish PostgreSQL concurrency behavior.
 - Real-time connections have no authentication. Sessions and replay buffers are local to one process.
-- Ping and echo replies are not retained. Order events and voice output are not connected to the real-time route.
-- Voice providers are simulations. Agent audio has an unbounded output queue and no route to send it to clients.
+- Ping, echo, and audio are not retained. The route does not publish order events or agent status events.
+- Voice providers are simulations. The route connects output delivery, but not binary input, VAD, STT processing, or agent turns.
+- Agent audio has an unbounded output queue. Barge-in cannot retract a chunk already passed to the send callback. Voice state does not survive reconnects.
 - Revenue and customer filters load orders and filter in Python.
 - Order items use current product prices. They do not store purchase-time prices.
 - Decimal arithmetic has no explicit currency-rounding policy. Product prices use `Numeric(12, 2)`.
@@ -462,7 +498,8 @@ This roadmap lists proposed work. Select a stage before you implement it.
 - [ ] Publish selected application events through retained session messages.
 - [ ] Define shared session storage before deployment with multiple workers.
 - [ ] Define malformed-message handling and delivery guarantees.
-- [ ] Add a voice route and supervise receive, processing, and output tasks.
+- [ ] Connect binary input, VAD events, and STT processing to the route. Supervise all voice tasks.
+- [ ] Define agent status events and when to send them before and after audio delivery.
 - [ ] Replace fake providers with real STT, VAD, LLM, and TTS integrations.
 - [ ] Define audio formats and bound the agent audio queue.
 - [ ] Test disconnect cleanup and interrupted output through the complete voice route.

@@ -7,7 +7,11 @@ from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from meridian_backend.api.routes import realtime
-from meridian_backend.realtime.connection_manager import ConnectionManager
+from meridian_backend.realtime.connection_manager import (
+    ConnectionManager,
+    OutBoundFrameType,
+    OutboundMessage,
+)
 
 
 @pytest.fixture
@@ -421,3 +425,96 @@ async def test_disconnect_does_not_close_already_disconnected_socket(manager):
     websocket.client_state = WebSocketState.DISCONNECTED
     await manager.disconnect(connection_id)
     websocket.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [b"audio", {"invalid": "binary payload"}])
+async def test_binary_frame_delivery_checks_payload(manager, payload):
+    websocket = socket()
+    connection_id = uuid4()
+    await manager.connect(connection_id, websocket)
+    completion = asyncio.get_running_loop().create_future()
+    state = manager.active_connections[connection_id]
+    state.outbound_queue.put_nowait(
+        OutboundMessage(OutBoundFrameType.BINARY, payload, completion)
+    )
+    try:
+        if isinstance(payload, bytes):
+            await asyncio.wait_for(completion, timeout=1)
+            websocket.send_bytes.assert_awaited_once_with(payload)
+            websocket.send_json.assert_not_awaited()
+        else:
+            with pytest.raises(TypeError, match="Binary frames require a bytes payload"):
+                await asyncio.wait_for(completion, timeout=1)
+            websocket.send_bytes.assert_not_awaited()
+        await asyncio.wait_for(state.outbound_queue.join(), timeout=1)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_json_and_voice_audio_use_one_writer_in_order(manager):
+    from meridian_backend.voice.session import VoiceSession
+
+    websocket = socket()
+    connection_id = uuid4()
+    session_id = manager.create_session(connection_id)
+    await manager.connect(connection_id, websocket)
+    writes = []
+    writers = []
+
+    async def send_json(payload):
+        writes.append(("json", payload["type"]))
+        writers.append(asyncio.current_task())
+
+    async def send_bytes(payload):
+        writes.append(("binary", payload))
+        writers.append(asyncio.current_task())
+
+    websocket.send_json.side_effect = send_json
+    websocket.send_bytes.side_effect = send_bytes
+    voice = VoiceSession(session_id=session_id)
+
+    async def send_audio(chunk):
+        await manager.send_session_audio(session_id, chunk)
+
+    audio_sender = asyncio.create_task(voice.send_agent_audio(send_audio))
+    try:
+        await manager.send_session_message(session_id, "agent.speaking", {})
+        for chunk in (b"chunk 1", b"chunk 2", b"chunk 3"):
+            await voice.agent_audio_queue.put(chunk)
+        await asyncio.wait_for(voice.agent_audio_queue.join(), timeout=1)
+        await manager.send_session_message(session_id, "agent.finished", {})
+        assert writes == [
+            ("json", "agent.speaking"),
+            ("binary", b"chunk 1"),
+            ("binary", b"chunk 2"),
+            ("binary", b"chunk 3"),
+            ("json", "agent.finished"),
+        ]
+        writer = manager.active_connections[connection_id].sender_task
+        assert all(task is writer for task in writers)
+        assert list(manager.sessions[session_id].pending_messages) == [1, 2]
+        assert manager.sessions[session_id].next_server_sequence == 3
+        assert manager.acknowledge(session_id, 1)
+        await manager.disconnect(connection_id)
+        await manager.send_session_audio(session_id, b"offline audio")
+        replacement_id = uuid4()
+        assert manager.resume_session(session_id, replacement_id)
+        await manager.connect(replacement_id, websocket)
+        await manager.send_session_audio(session_id, b"before replay")
+        writes.clear()
+        await manager.replay_session_messages(session_id)
+        assert writes == [("json", "agent.finished")]
+        await manager.send_session_audio(session_id, b"live again")
+        assert writes[-1] == ("binary", b"live again")
+    finally:
+        audio_sender.cancel()
+        await asyncio.gather(audio_sender, return_exceptions=True)
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unknown_session_audio_is_rejected(manager):
+    with pytest.raises(ValueError, match="Unknown session"):
+        await manager.send_session_audio(uuid4(), b"audio")

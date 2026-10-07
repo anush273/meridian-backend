@@ -6,6 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from meridian_backend.realtime.connection_manager import ConnectionManager
 from meridian_backend.schemas.realtime import RealtimeMessage
+from meridian_backend.voice.session import VoiceSession
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ async def realtime_socket(websocket: WebSocket, session_id: UUID | None = None) 
         await websocket.close(code=1008, reason="Session unavailable")
         return
 
+    audio_sender: asyncio.Task[None] | None = None
     try:
         await manager.connect(connection_id, websocket)
         logger.info("websocket_connected", extra={"connection_id": str(connection_id)})
@@ -35,11 +37,19 @@ async def realtime_socket(websocket: WebSocket, session_id: UUID | None = None) 
             connection_id,
             RealtimeMessage(
                 type="connection.ready",
+                
                 sequence=0,
                 data={"connection_id": str(connection_id), "session_id": str(session_id)},
             ),
         )
         await manager.replay_session_messages(session_id)
+        voice_session = VoiceSession(session_id=session_id)
+
+        async def send_audio(chunk: bytes) -> None:
+            await manager.send_session_audio(session_id, chunk)
+
+        audio_sender = asyncio.create_task(voice_session.send_agent_audio(send_audio))
+        voice_session.agent_audio_sender_task = audio_sender
         while True:
             try:
                 payload = await asyncio.wait_for(websocket.receive_json(), timeout=30)
@@ -86,6 +96,9 @@ async def realtime_socket(websocket: WebSocket, session_id: UUID | None = None) 
         logger.info("websocket_disconnected", extra={"connection_id": str(connection_id)})
 
     finally:
+        if audio_sender is not None:
+            audio_sender.cancel()
+            await asyncio.gather(audio_sender, return_exceptions=True)
         await manager.disconnect(connection_id)
         logger.info(
             "live_connections=%s",

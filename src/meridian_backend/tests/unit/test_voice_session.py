@@ -6,8 +6,13 @@ from uuid import uuid4
 import pytest
 from fastapi import WebSocket, WebSocketDisconnect
 
-from meridian_backend.voice.session import TEXT_END_OF_STREAM, SessionState, VoiceSession
-from meridian_backend.voice.stt import fake_stt
+from meridian_backend.voice.session import (
+    AUDIO_TURN_END,
+    TEXT_END_OF_STREAM,
+    SessionState,
+    VoiceSession,
+)
+from meridian_backend.voice.stt import FakeStreamingSTT, fake_stt
 from meridian_backend.voice.vad import FakeVAD, TurnEvent, VADState
 
 
@@ -135,7 +140,9 @@ async def test_fake_incoming_audio_backpressure():
         print("queue full: producer waits on chunk-6")
 
         started = monotonic()
-        consumer = asyncio.create_task(session.process_audio(send_audio=send_audio))
+        stt = FakeStreamingSTT()
+        stt.send_audio = AsyncMock(side_effect=send_audio)
+        consumer = asyncio.create_task(session.process_audio(stt=stt))
         with pytest.raises(WebSocketDisconnect):
             await asyncio.wait_for(producer, timeout=5)
         producer_duration = monotonic() - started
@@ -534,3 +541,164 @@ async def test_speech_during_failure_cleanup_keeps_user_state(monkeypatch):
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_streaming_stt_finalizes_and_resets_each_turn(monkeypatch):
+    monkeypatch.setattr("meridian_backend.voice.stt.fake_stt", AsyncMock())
+    stt = FakeStreamingSTT()
+    await stt.send_audio(b"Where is ")
+    await stt.send_audio(b"my order?")
+    assert await stt.finalize() == "Where is my order?"
+    await stt.send_audio(b"Thanks")
+    assert await stt.finalize() == "Thanks"
+    assert await stt.finalize() == ""
+
+
+@pytest.mark.asyncio
+async def test_turn_end_finalizes_audio_before_starting_agent(monkeypatch):
+    monkeypatch.setattr("meridian_backend.voice.stt.fake_stt", AsyncMock())
+    session = VoiceSession(session_id=uuid4())
+    session.start_agent_turn = AsyncMock()
+    stt = FakeStreamingSTT()
+    consumer = asyncio.create_task(session.process_audio(stt=stt))
+    try:
+        await session.handle_vad_event("speech")
+        await session.audio_queue.put(b"Track ")
+        await session.audio_queue.put(b"my order")
+        await session.audio_queue.join()
+        session.start_agent_turn.assert_not_awaited()
+        assert await session.handle_vad_event("silence", 500) == TurnEvent.USER_TURN_COMPLETE
+        assert session.state == SessionState.IDLE
+        await asyncio.wait_for(session.audio_queue.join(), timeout=1)
+        session.start_agent_turn.assert_awaited_once_with("Track my order")
+        # Extra silence must not finalize the same turn twice.
+        assert await session.handle_vad_event("silence", 500) is None
+        assert session.audio_queue.empty()
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_turn_end_waits_for_queue_space_without_holding_turn_lock():
+    session = VoiceSession(session_id=uuid4())
+    await session.handle_vad_event("speech")
+    for _ in range(session.audio_queue.maxsize):
+        session.audio_queue.put_nowait(b"audio")
+    completion = asyncio.create_task(session.handle_vad_event("silence", 500))
+    try:
+        await asyncio.sleep(0)
+        assert not completion.done()
+        async with asyncio.timeout(1):
+            async with session._turn_lock:
+                assert session.state == SessionState.IDLE
+        assert session.audio_queue.get_nowait() == b"audio"
+        session.audio_queue.task_done()
+        assert await asyncio.wait_for(completion, timeout=1) == TurnEvent.USER_TURN_COMPLETE
+        queued = []
+        while not session.audio_queue.empty():
+            queued.append(session.audio_queue.get_nowait())
+            session.audio_queue.task_done()
+        assert queued == [b"audio"] * 4 + [AUDIO_TURN_END]
+        await session.audio_queue.join()
+    finally:
+        completion.cancel()
+        await asyncio.gather(completion, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_audio_sender_delivers_stream_in_order():
+    session = VoiceSession(session_id=uuid4())
+    sent = []
+
+    async def fake_client_send(audio: bytes) -> None:
+        print("sent:", audio)
+        sent.append(audio)
+
+    sender = asyncio.create_task(session.send_agent_audio(fake_client_send))
+    await session.start_agent_turn("Where is my order?")
+    llm, tts = session.llm_task, session.tts_task
+    try:
+        await asyncio.wait_for(asyncio.gather(llm, tts), timeout=5)
+        await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+        assert sent == [b"Your ", b"order ", b"was ", b"shipped."]
+        assert session.agent_audio_sender_task is sender
+        assert not sender.done()
+    finally:
+        for task in (sender, llm, tts):
+            task.cancel()
+        await asyncio.gather(sender, llm, tts, return_exceptions=True)
+    assert session.agent_audio_sender_task is None
+
+
+@pytest.mark.asyncio
+async def test_barge_in_preserves_sender_and_incoming_audio(monkeypatch):
+    session = VoiceSession(session_id=uuid4())
+    first_send_started = asyncio.Event()
+    release_send = asyncio.Event()
+    sent = []
+
+    async def fake_client_send(audio: bytes) -> None:
+        first_send_started.set()
+        await release_send.wait()
+        sent.append(audio)
+
+    async def blocked_llm(self, transcript):
+        await asyncio.Event().wait()
+
+    async def blocked_tts(self):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(VoiceSession, "run_llm", blocked_llm)
+    monkeypatch.setattr(VoiceSession, "run_tts", blocked_tts)
+    sender = asyncio.create_task(session.send_agent_audio(fake_client_send))
+    await session.agent_audio_queue.put(b"in-flight")
+    await asyncio.wait_for(first_send_started.wait(), timeout=1)
+    await session.start_agent_turn()
+    llm, tts = session.llm_task, session.tts_task
+    await asyncio.sleep(0)
+    session.text_queue.put_nowait("stale text")
+    session.agent_audio_queue.put_nowait(b"stale audio")
+    try:
+        await session.handle_vad_event("speech_started")
+        assert llm.cancelled() and tts.cancelled()
+        assert session.text_queue.empty() and session.agent_audio_queue.empty()
+        assert session.agent_audio_sender_task is sender
+        assert not sender.done()
+        await session.audio_queue.put(b"new user audio")
+        assert session.audio_queue.get_nowait() == b"new user audio"
+        session.audio_queue.task_done()
+        # A chunk already handed to the callback can finish; queued stale audio is discarded.
+        release_send.set()
+        await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+        await session.agent_audio_queue.put(b"next turn audio")
+        await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+        assert sent == [b"in-flight", b"next turn audio"]
+        assert not sender.done()
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, llm, tts, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_agent_audio_sender_completes_queue_item_on_failure_or_cancellation(cancel):
+    session = VoiceSession(session_id=uuid4())
+    sending = asyncio.Event()
+
+    async def fake_client_send(audio: bytes) -> None:
+        sending.set()
+        if cancel:
+            await asyncio.Event().wait()
+        raise RuntimeError("send failed")
+
+    session.agent_audio_queue.put_nowait(b"audio")
+    sender = asyncio.create_task(session.send_agent_audio(fake_client_send))
+    await asyncio.wait_for(sending.wait(), timeout=1)
+    if cancel:
+        sender.cancel()
+    with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
+        await sender
+    await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+    assert session.agent_audio_sender_task is None

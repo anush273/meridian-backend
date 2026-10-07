@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import StrEnum
 from time import monotonic
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,9 +12,15 @@ from starlette.websockets import WebSocketState
 from meridian_backend.schemas.realtime import RealtimeMessage
 
 
+class OutBoundFrameType(StrEnum):
+    JSON = "json"
+    BINARY = "binary"
+
+
 @dataclass
 class OutboundMessage:
-    payload: dict[str, Any]
+    frame_type: OutBoundFrameType
+    payload: dict[str, Any] | bytes
     completion: asyncio.Future[None]
 
 
@@ -107,13 +114,27 @@ class ConnectionManager:
                     await state.websocket.close()
 
     async def send_json(self, connection_id: UUID, payload: RealtimeMessage) -> None:
+        await self._enqueue_frame(
+            connection_id, OutBoundFrameType.JSON, payload.model_dump(mode="json")
+        )
+
+    async def send_bytes(self, connection_id: UUID, payload: bytes) -> None:
+        await self._enqueue_frame(connection_id, OutBoundFrameType.BINARY, payload)
+
+    async def _enqueue_frame(
+        self, connection_id: UUID, frame_type: OutBoundFrameType, payload: dict[str, Any] | bytes
+    ) -> None:
         connection = self.active_connections.get(connection_id)
 
         if connection is None:
             return
 
         completion = asyncio.get_running_loop().create_future()
-        item = OutboundMessage(payload.model_dump(mode="json"), completion)
+        item = OutboundMessage(
+            frame_type=frame_type,
+            payload=payload,
+            completion=completion,
+        )
         try:
             connection.outbound_queue.put_nowait(item)
         except asyncio.QueueFull as exc:
@@ -121,6 +142,17 @@ class ConnectionManager:
             await self.disconnect(connection_id)
             raise BufferError("Connection outbound queue is full") from exc
         await completion
+
+    async def send_session_audio(self, session_id: UUID, payload: bytes) -> None:
+        """Send live audio without sequence numbers, retention, or replay."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise ValueError("Unknown session")
+        async with session.send_lock:
+            # Never deliver audio ahead of ready/backlog on a resumed connection.
+            if session.replay_required:
+                return
+            await self.send_bytes(session.connection_id, payload)
 
     def mark_seen(self, connection_id: UUID) -> None:
         connection = self.active_connections.get(connection_id)
@@ -217,22 +249,31 @@ class ConnectionManager:
     async def _sender_loop(self, connection_id: UUID, state: ConnectionState) -> None:
         try:
             while True:
-                item = await state.outbound_queue.get()
+                message = await state.outbound_queue.get()
                 try:
-                    await state.websocket.send_json(item.payload)
+                    if message.frame_type == OutBoundFrameType.JSON:
+                        if not isinstance(message.payload, dict):
+                            raise TypeError("JSON frames require a dictionary payload")
+                        await state.websocket.send_json(message.payload)
+                    elif message.frame_type == OutBoundFrameType.BINARY:
+                        if not isinstance(message.payload, bytes):
+                            raise TypeError("Binary frames require a bytes payload")
+                        await state.websocket.send_bytes(message.payload)
+                    else:
+                        raise ValueError("Unsupported outbound frame type")
                 except asyncio.CancelledError:
-                    if not item.completion.done():
-                        item.completion.set_exception(
+                    if not message.completion.done():
+                        message.completion.set_exception(
                             ConnectionError("Connection closed during send")
                         )
                     raise
                 except Exception as exc:
-                    if not item.completion.done():
-                        item.completion.set_exception(exc)
+                    if not message.completion.done():
+                        message.completion.set_exception(exc)
                     return
                 else:
-                    if not item.completion.done():
-                        item.completion.set_result(None)
+                    if not message.completion.done():
+                        message.completion.set_result(None)
                 finally:
                     state.outbound_queue.task_done()
         finally:
