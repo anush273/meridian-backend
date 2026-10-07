@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi import WebSocket, WebSocketDisconnect
 
-from meridian_backend.voice.session import SessionState, VoiceSession
+from meridian_backend.voice.session import TEXT_END_OF_STREAM, SessionState, VoiceSession
 from meridian_backend.voice.stt import fake_stt
 from meridian_backend.voice.vad import FakeVAD, TurnEvent, VADState
 
@@ -238,7 +238,7 @@ async def test_cancellation_handler_can_acquire_turn_lock(monkeypatch):
             await release_cleanup.wait()
             session.agent_audio_queue.put_nowait(b"last-stale-output")
 
-    monkeypatch.setattr("meridian_backend.voice.session.fake_llm_task", llm)
+    monkeypatch.setattr(VoiceSession, "run_llm", lambda self, transcript: llm())
     await session.start_agent_turn()
     old_llm, old_tts = session.llm_task, session.tts_task
     await started.wait()
@@ -270,8 +270,8 @@ async def test_finished_agent_task_references_are_cleared(monkeypatch):
     async def finish():
         await asyncio.sleep(0)
 
-    monkeypatch.setattr("meridian_backend.voice.session.fake_llm_task", finish)
-    monkeypatch.setattr("meridian_backend.voice.session.fake_tts_task", finish)
+    monkeypatch.setattr(VoiceSession, "run_llm", lambda self, transcript: finish())
+    monkeypatch.setattr(VoiceSession, "run_tts", lambda self: finish())
     session = VoiceSession(session_id=uuid4())
     await session.start_agent_turn()
     await asyncio.gather(session.llm_task, session.tts_task)
@@ -289,8 +289,8 @@ async def test_normal_agent_completion_waits_for_both_tasks(monkeypatch, first):
     async def tts():
         await tts_release.wait()
 
-    monkeypatch.setattr("meridian_backend.voice.session.fake_llm_task", llm)
-    monkeypatch.setattr("meridian_backend.voice.session.fake_tts_task", tts)
+    monkeypatch.setattr(VoiceSession, "run_llm", lambda self, transcript: llm())
+    monkeypatch.setattr(VoiceSession, "run_tts", lambda self: tts())
     session = VoiceSession(session_id=uuid4())
     await session.start_agent_turn()
     llm_task, tts_task = session.llm_task, session.tts_task
@@ -326,11 +326,211 @@ async def test_interrupted_tasks_finishing_normally_cannot_reset_user_state(monk
         except asyncio.CancelledError:
             pass
 
-    monkeypatch.setattr("meridian_backend.voice.session.fake_llm_task", suppress_cancellation)
-    monkeypatch.setattr("meridian_backend.voice.session.fake_tts_task", suppress_cancellation)
+    monkeypatch.setattr(VoiceSession, "run_llm", lambda self, transcript: suppress_cancellation())
+    monkeypatch.setattr(VoiceSession, "run_tts", lambda self: suppress_cancellation())
     session = VoiceSession(session_id=uuid4())
     await session.start_agent_turn()
     await started.wait()
     await session.handle_vad_event("speech_started")
     assert session.state == SessionState.USER_SPEAKING
     assert session.llm_task is None and session.tts_task is None
+
+
+@pytest.mark.asyncio
+async def test_streaming_pipeline_produces_ordered_fake_audio():
+    session = VoiceSession(session_id=uuid4())
+    assert session.text_queue.maxsize == 10
+    await session.start_agent_turn("Where is my order?")
+    llm, tts = session.llm_task, session.tts_task
+    try:
+        await asyncio.wait_for(asyncio.gather(llm, tts), timeout=5)
+        assert session.state == SessionState.IDLE
+        assert session.llm_task is None and session.tts_task is None
+        assert session.text_queue.empty()
+        await asyncio.wait_for(session.text_queue.join(), timeout=1)
+        audio = []
+        while not session.agent_audio_queue.empty():
+            audio.append(session.agent_audio_queue.get_nowait())
+            session.agent_audio_queue.task_done()
+        assert audio == [b"Your ", b"order ", b"was ", b"shipped."]
+    finally:
+        for task in (llm, tts):
+            task.cancel()
+        await asyncio.gather(llm, tts, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_full_text_queue_barge_in_clears_output_only(monkeypatch):
+    produced = []
+    full = asyncio.Event()
+    business_release = asyncio.Event()
+    prompts = []
+
+    async def stream_llm(transcript):
+        prompts.append(transcript)
+        for index in range(20):
+            produced.append(index)
+            if index == 11:
+                full.set()
+            yield str(index)
+
+    async def stream_tts(text):
+        yield text.encode()
+        # Leave one text item in flight and the producer blocked on its full queue.
+        await asyncio.Event().wait()
+
+    async def business_work():
+        await business_release.wait()
+
+    monkeypatch.setattr("meridian_backend.voice.session.fake_streaming_llm", stream_llm)
+    monkeypatch.setattr("meridian_backend.voice.session.fake_streaming_tts", stream_tts)
+    monkeypatch.setattr("meridian_backend.voice.session.fake_business_task", business_work)
+    session = VoiceSession(session_id=uuid4())
+    session.audio_queue.put_nowait(b"user-input")
+    business = session.start_business_task()
+    await session.start_agent_turn("test transcript")
+    llm, tts = session.llm_task, session.tts_task
+    try:
+        await asyncio.wait_for(full.wait(), timeout=1)
+        assert prompts == ["test transcript"]
+        assert session.text_queue.full()
+        assert len(produced) == 12
+        assert not llm.done() and not tts.done()
+        assert not session.agent_audio_queue.empty()
+        await asyncio.wait_for(session.handle_vad_event("speech_started"), timeout=1)
+        assert llm.cancelled() and tts.cancelled()
+        assert session.text_queue.empty()
+        assert session.agent_audio_queue.empty()
+        await asyncio.wait_for(session.text_queue.join(), timeout=1)
+        await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+        assert session.state == SessionState.USER_SPEAKING
+        assert session.audio_queue.get_nowait() == b"user-input"
+        session.audio_queue.task_done()
+        assert not business.done()
+        business_release.set()
+        await business
+        assert not business.cancelled()
+    finally:
+        for task in (llm, tts, business):
+            task.cancel()
+        await asyncio.gather(llm, tts, business, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_tts_stops_at_explicit_end_of_stream():
+    session = VoiceSession(session_id=uuid4())
+    session.text_queue.put_nowait(TEXT_END_OF_STREAM)
+    await asyncio.wait_for(session.run_tts(), timeout=1)
+    assert session.agent_audio_queue.empty()
+    await asyncio.wait_for(session.text_queue.join(), timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["llm", "tts"])
+async def test_provider_failure_cancels_sibling_and_cleans_output(monkeypatch, caplog, provider):
+    session = VoiceSession(session_id=uuid4())
+    fail = asyncio.Event()
+    sibling_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    business_release = asyncio.Event()
+
+    async def failing():
+        await fail.wait()
+        raise RuntimeError("fake provider failed")
+
+    async def sibling_work():
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Re-entering a session lock during cancellation must remain safe.
+            async with session._turn_lock:
+                cleanup_started.set()
+            await cleanup_release.wait()
+            session.text_queue.put_nowait("late text")
+            session.agent_audio_queue.put_nowait(b"late audio")
+
+    async def business_work():
+        await business_release.wait()
+
+    llm_work = failing if provider == "llm" else sibling_work
+    tts_work = failing if provider == "tts" else sibling_work
+    monkeypatch.setattr(VoiceSession, "run_llm", lambda self, transcript: llm_work())
+    monkeypatch.setattr(VoiceSession, "run_tts", lambda self: tts_work())
+    monkeypatch.setattr("meridian_backend.voice.session.fake_business_task", business_work)
+    business = session.start_business_task()
+    session.audio_queue.put_nowait(b"user input")
+    session.text_queue.put_nowait("stale text")
+    session.agent_audio_queue.put_nowait(b"stale audio")
+    await session.start_agent_turn("test")
+    llm, tts = session.llm_task, session.tts_task
+    failed_task, sibling = (llm, tts) if provider == "llm" else (tts, llm)
+    try:
+        await sibling_started.wait()
+        fail.set()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        assert session.llm_task is None and session.tts_task is None
+        with pytest.raises(RuntimeError, match="cancellation is still in progress"):
+            await session.start_agent_turn()
+        cleanup_release.set()
+        await asyncio.wait_for(asyncio.gather(llm, tts, return_exceptions=True), timeout=1)
+        assert sibling.cancelled()
+        assert failed_task.exception() is None
+        assert session.state == SessionState.IDLE
+        assert session.text_queue.empty() and session.agent_audio_queue.empty()
+        await asyncio.wait_for(session.text_queue.join(), timeout=1)
+        await asyncio.wait_for(session.agent_audio_queue.join(), timeout=1)
+        assert session.audio_queue.get_nowait() == b"user input"
+        session.audio_queue.task_done()
+        assert not business.done()
+        business_release.set()
+        await business
+        assert "Agent provider failure" in caplog.text
+        assert "fake provider failed" in caplog.text
+        assert str(session.session_id) in caplog.text
+        # A recovered session can start another turn.
+        await session.start_agent_turn()
+        await asyncio.wait_for(session.handle_vad_event("speech_started"), timeout=1)
+    finally:
+        cleanup_release.set()
+        for task in (llm, tts, business):
+            task.cancel()
+        await asyncio.gather(llm, tts, business, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_speech_during_failure_cleanup_keeps_user_state(monkeypatch):
+    session = VoiceSession(session_id=uuid4())
+    fail = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+
+    async def llm(self, transcript):
+        await fail.wait()
+        raise RuntimeError("LLM failure")
+
+    async def tts(self):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    monkeypatch.setattr(VoiceSession, "run_llm", llm)
+    monkeypatch.setattr(VoiceSession, "run_tts", tts)
+    await session.start_agent_turn()
+    tasks = (session.llm_task, session.tts_task)
+    try:
+        await asyncio.sleep(0)
+        fail.set()
+        await asyncio.wait_for(cleaning.wait(), timeout=1)
+        await session.handle_vad_event("speech_started")
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=1)
+        assert session.state == SessionState.USER_SPEAKING
+    finally:
+        release.set()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

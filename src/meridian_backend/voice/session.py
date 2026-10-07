@@ -1,13 +1,16 @@
 import asyncio
-from collections.abc import Awaitable, Callable
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum, StrEnum
 from uuid import UUID
 
 from fastapi import WebSocket
 
 from meridian_backend.voice.stt import fake_stt
 from meridian_backend.voice.vad import FakeVAD, TurnEvent, VADEvent
+
+logger = logging.getLogger(__name__)
 
 
 class SessionState(StrEnum):
@@ -16,12 +19,24 @@ class SessionState(StrEnum):
     USER_SPEAKING = "USER_SPEAKING"
 
 
-async def fake_llm_task() -> None:
-    await asyncio.sleep(30)
+class TextStreamEnd(Enum):
+    END_OF_STREAM = "end_of_stream"
 
 
-async def fake_tts_task() -> None:
-    await asyncio.sleep(30)
+TEXT_END_OF_STREAM = TextStreamEnd.END_OF_STREAM
+
+
+async def fake_streaming_llm(transcript: str) -> AsyncIterator[str]:
+    """Yield a fixed fake response; the transcript is the simulated prompt."""
+    for chunk in ("Your ", "order ", "was ", "shipped."):
+        await asyncio.sleep(0.4)
+        yield chunk
+
+
+async def fake_streaming_tts(text: str) -> AsyncIterator[bytes]:
+    """Simulate audio generation for a single text chunk."""
+    await asyncio.sleep(0.4)
+    yield text.encode("utf-8")
 
 
 async def fake_business_task() -> None:
@@ -37,6 +52,9 @@ class VoiceSession:
     state: SessionState = field(default=SessionState.IDLE, init=False)
     # Incoming audio stays in audio_queue; only stale agent output is discarded.
     agent_audio_queue: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
+    text_queue: asyncio.Queue[str | TextStreamEnd] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=10)
+    )
     llm_task: asyncio.Task[None] | None = field(default=None, init=False)
     tts_task: asyncio.Task[None] | None = field(default=None, init=False)
     business_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -44,7 +62,7 @@ class VoiceSession:
     _agent_output_cancelling: bool = field(default=False, init=False, repr=False)
     _agent_turn_succeeded: bool = field(default=True, init=False, repr=False)
 
-    async def start_agent_turn(self) -> None:
+    async def start_agent_turn(self, transcript: str = "") -> None:
         async with self._turn_lock:
             if self.state == SessionState.AGENT_SPEAKING:
                 raise RuntimeError("An agent turn is already active")
@@ -54,21 +72,49 @@ class VoiceSession:
                 raise RuntimeError("Agent output cancellation is still in progress")
             self._agent_turn_succeeded = True
             self.llm_task = asyncio.create_task(
-                self._run_agent_task(fake_llm_task), name="fake_llm_task"
+                self._run_agent_task(lambda: self.run_llm(transcript)), name="fake_llm_task"
             )
             self.tts_task = asyncio.create_task(
-                self._run_agent_task(fake_tts_task), name="fake_tts_task"
+                self._run_agent_task(self.run_tts), name="fake_tts_task"
             )
             # Also clear references if a task is cancelled before its coroutine starts.
             self.llm_task.add_done_callback(self._clear_finished_agent_task)
             self.tts_task.add_done_callback(self._clear_finished_agent_task)
             self.state = SessionState.AGENT_SPEAKING
 
+    async def run_llm(self, transcript: str) -> None:
+        async for text in fake_streaming_llm(transcript):
+            await self.text_queue.put(text)
+        # Only normal completion emits EOS. Cancellation must not block on a full queue.
+        await self.text_queue.put(TEXT_END_OF_STREAM)
+
+    async def run_tts(self) -> None:
+        while True:
+            text = await self.text_queue.get()
+            try:
+                if text is TEXT_END_OF_STREAM:
+                    return
+                if isinstance(text, str):
+                    async for audio in fake_streaming_tts(text):
+                        await self.agent_audio_queue.put(audio)
+            finally:
+                self.text_queue.task_done()
+
     async def _run_agent_task(self, work: Callable[[], Awaitable[None]]) -> None:
         succeeded = False
         try:
             await work()
             succeeded = True
+        except Exception:
+            # Consume and log provider errors so detached tasks do not leave
+            # unobserved exceptions. CancelledError still propagates normally.
+            task = asyncio.current_task()
+            logger.exception(
+                "Agent provider failure in session %s (%s)",
+                self.session_id,
+                task.get_name() if task is not None else "unknown task",
+            )
+            await self._handle_agent_failure()
         finally:
             task = asyncio.current_task()
             async with self._turn_lock:
@@ -84,6 +130,24 @@ class VoiceSession:
                         and not self._agent_output_cancelling
                     ):
                         self.state = SessionState.IDLE
+
+    async def _handle_agent_failure(self) -> None:
+        task = asyncio.current_task()
+        async with self._turn_lock:
+            if task is None or (task is not self.llm_task and task is not self.tts_task):
+                # Barge-in or another failure already owns this turn's cleanup.
+                return
+            sibling = self.tts_task if task is self.llm_task else self.llm_task
+            self._agent_turn_succeeded = False
+            self._agent_output_cancelling = True
+            self.llm_task = None
+            self.tts_task = None
+            # IDLE is safe, but starting output stays blocked until queues are drained.
+            self.state = SessionState.IDLE
+            if sibling is not None and not sibling.done():
+                sibling.cancel()
+        # Never await ourselves, or hold the lock while sibling cleanup runs.
+        await self._cancel_agent_output([] if sibling is None else [sibling])
 
     def _clear_finished_agent_task(self, task: asyncio.Task[None]) -> None:
         # Identity checks keep an old callback from clearing a newer turn's task.
@@ -133,6 +197,13 @@ class VoiceSession:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             async with self._turn_lock:
+                while True:
+                    try:
+                        self.text_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    else:
+                        self.text_queue.task_done()
                 while True:
                     try:
                         self.agent_audio_queue.get_nowait()
